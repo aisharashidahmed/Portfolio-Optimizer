@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 # Import your HRP robot from the engine room
-from src.algorithms.hrp import HRPOptimizer
+from src.algorithms.mvo import MVOOptimizer
 
 print("="*60)
 print("STARTING THE HRP ROBOT TEST")
@@ -26,11 +26,11 @@ print(annual_returns.round(4))
 
 # 2. Build the HRP robot
 print(f"\n[3] Initializing HRP Robot...")
-hrp_robot = HRPOptimizer()
+mvo_robot = MVOOptimizer()
 
 # 3. Tell the robot to optimize
 print(f"[4] HRP Robot is walking the tree...")
-weights = hrp_robot.optimize(daily_returns, cov_matrix)
+weights = mvo_robot.optimize(daily_returns, cov_matrix)
 
 # 4. Display the results
 print(f"\n[5] FINAL OPTIMAL WEIGHTS:")
