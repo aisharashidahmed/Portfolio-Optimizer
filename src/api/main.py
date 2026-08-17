@@ -1,8 +1,6 @@
 # src/api/main.py
-
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException
-from src.tasks import run_optimization
 from pydantic import BaseModel
 from typing import List, Optional
 import yfinance as yf
@@ -10,6 +8,12 @@ import pandas as pd
 import numpy as np
 import redis
 import json
+
+from src.algorithms.hrp import HRPOptimizer
+from src.algorithms.mvo import MVOOptimizer
+from src.tasks import run_optimization
+from src.auth import get_password_hash, verify_password, create_access_token, get_current_user
+from src.database import SessionLocal, User
 
 # Import our Engine Room machines (the robots we built)
 from src.algorithms.hrp import HRPOptimizer
@@ -30,6 +34,18 @@ class OptimizationResponse(BaseModel):
     algorithm: str
     status: str
 
+class UserCreate(BaseModel):
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
 # --- 2. The Front Door (FastAPI App) - THIS IS THE "app" THE ELECTRICIAN IS LOOKING FOR! ---
 app = FastAPI(title="Portfolio Optimizer Engine", version="1.0.0")
 # --- CORS: Allow requests from browsers ---
@@ -49,35 +65,62 @@ def fetch_data(tickers, start_date, end_date):
     return daily_returns, cov_matrix
 
 # --- 4. The Dispatcher (The Endpoint) ---
+@app.post("/auth/signup", response_model=TokenResponse)
+async def signup(user_data: UserCreate):
+    db = SessionLocal()
+    # Check if user exists
+    existing_user = db.query(User).filter(User.email == user_data.email).first()
+    if existing_user:
+        db.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create new user
+    hashed_password = get_password_hash(user_data.password)
+    new_user = User(email=user_data.email, hashed_password=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    db.close()
+    
+    # Create token
+    access_token = create_access_token(data={"sub": new_user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(user_data: UserLogin):
+    db = SessionLocal()
+    user = db.query(User).filter(User.email == user_data.email).first()
+    db.close()
+    
+    if not user or not verify_password(user_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
 
 @app.post("/optimize", response_model=dict)
-async def optimize_portfolio(request: OptimizationRequest):
-    """
-    Submits an optimization request to the kitchen.
-    Returns a task_id immediately so the user can check status later.
-    """
+async def optimize_portfolio(
+    request: OptimizationRequest,
+    current_user: User = Depends(get_current_user)  # <-- The Bouncer!
+):
     # 1. Validate the algorithm
     if request.algorithm not in ["hrp", "mvo"]:
         raise HTTPException(status_code=400, detail="Algorithm must be 'hrp' or 'mvo'")
 
-    # 2. Submit the task to Celery (put it on the Redis rack)
+    # 2. Submit the task to Celery
     task = run_optimization.delay(
         tickers=request.tickers,
         start_date=request.start_date,
         end_date=request.end_date,
         algorithm=request.algorithm,
-        max_weight=request.max_weight
+        max_weight=request.max_weight,
+        user_id=current_user.id  # <-- Pass the logged-in user's ID!
     )
-
-    # 3. Hand the customer their receipt (task_id)
     return {
         "task_id": task.id,
         "status": "Processing started",
         "message": "Use GET /status/{task_id} to check the result."
     }
-
-import redis
-import json
 
 redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
