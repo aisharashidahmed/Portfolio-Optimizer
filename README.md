@@ -271,6 +271,11 @@ pytest tests/test_hrp.py -v         # one module
 ruff check src tests                # lint
 ```
 
+`pyproject.toml` sets `pythonpath = ["."]` so a bare `pytest` resolves
+`from src...`. Without it the suite passes under `python -m pytest`, which adds
+the working directory to `sys.path` automatically, and fails on a clean clone —
+which is exactly what CI caught.
+
 The suite makes no network calls — the yfinance boundary is faked in
 `tests/conftest.py`, and the API tests run against a real FastAPI app wired to
 an in-memory SQLite database. Auth and persistence are exercised for real

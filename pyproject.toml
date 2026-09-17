@@ -5,6 +5,13 @@ description = "Portfolio optimization and backtesting across US and Kenyan marke
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
+# Put the project root on sys.path so `from src...` resolves.
+#
+# `python -m pytest` adds the working directory automatically, but a bare
+# `pytest` does not -- which is what CI runs, and what the README tells people
+# to run. Without this the suite imports fine locally and fails on a clean
+# clone.
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q --strict-markers"
