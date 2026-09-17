@@ -327,6 +327,8 @@ than checking cases we thought of. It found three real problems:
 
 ## Documentation
 
+- **[docs/SUMMARY.md](docs/SUMMARY.md)** — how to describe this project, from a
+  résumé bullet to a spoken walkthrough.
 - **[docs/STUDY_GUIDE.md](docs/STUDY_GUIDE.md)** — how the non-obvious parts
   work and why: HRP's avoidance of matrix inversion, what the Ledoit-Wolf
   shrinkage intensity means, why no-lookahead needs structural enforcement, the
