@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
+import { getToken, signOut, subscribeToToken } from "@/lib/auth";
 
 const LINKS = [
   { href: "/", label: "Currency risk" },
@@ -12,6 +14,12 @@ const LINKS = [
 
 export default function Nav() {
   const pathname = usePathname();
+  const [signedIn, setSignedIn] = useState(false);
+
+  useEffect(() => {
+    setSignedIn(getToken() !== null);
+    return subscribeToToken((token) => setSignedIn(token !== null));
+  }, []);
 
   return (
     <nav className="nav">
@@ -31,6 +39,20 @@ export default function Nav() {
             </Link>
           ))}
         </div>
+
+        {signedIn && (
+          <>
+            <span className="nav-spacer" />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ fontSize: "0.8rem", padding: "5px 12px" }}
+              onClick={signOut}
+            >
+              Sign out
+            </button>
+          </>
+        )}
       </div>
     </nav>
   );

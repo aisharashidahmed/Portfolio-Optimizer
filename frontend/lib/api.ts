@@ -3,7 +3,9 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
-const TOKEN_KEY = "portfolio.token";
+import { getToken, setToken } from "./auth";
+
+export { getToken, setToken, signOut, subscribeToToken } from "./auth";
 
 export class ApiError extends Error {
   constructor(
@@ -12,24 +14,6 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = "ApiError";
-  }
-}
-
-/** localStorage can throw in a private window; never let that break a render. */
-export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setToken(token: string | null): void {
-  try {
-    if (token === null) localStorage.removeItem(TOKEN_KEY);
-    else localStorage.setItem(TOKEN_KEY, token);
-  } catch {
-    /* ignore */
   }
 }
 
@@ -54,6 +38,17 @@ async function request<T>(
       `Cannot reach the API at ${API_BASE}. Start it with: uvicorn src.api.main:app --reload`,
       0,
     );
+  }
+
+  if (response.status === 401 && auth) {
+    // The token is no longer usable -- expired, or naming an account that no
+    // longer exists. Clearing it notifies every subscriber, which drops the UI
+    // back to the sign-in card instead of stranding the reader on an error
+    // string with no way out.
+    //
+    // Guarded on `auth`: /auth/login also answers 401 for a wrong password,
+    // and signing the user out mid-login attempt would be nonsense.
+    setToken(null);
   }
 
   if (!response.ok) {

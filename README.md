@@ -32,7 +32,8 @@ a footnote.
   working light and dark modes
 - **REST API** with JWT auth, request validation, and per-user run history
 - **Async job queue** for optimizations too slow to run inline
-- **277 tests**, 90% line coverage, no network access required to run them
+- **277 backend tests** at 90% coverage plus **20 frontend tests**, none of
+  which need network access
 
 ## Quickstart
 

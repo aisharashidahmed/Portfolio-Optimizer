@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ApiError, api, getToken, setToken } from "@/lib/api";
+import { ApiError, api, getToken, setToken, subscribeToToken } from "@/lib/api";
 
 /**
  * Minimal auth wrapper.
@@ -21,6 +21,14 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setAuthed(getToken() !== null);
     setReady(true);
+
+    // A 401 anywhere clears the token; that must drop us back to sign-in
+    // rather than leaving the reader stuck on an error string. Also covers
+    // the sign-out button and a second tab signing out.
+    return subscribeToToken((token) => {
+      setAuthed(token !== null);
+      if (token === null) setError(null);
+    });
   }, []);
 
   const authenticate = async () => {

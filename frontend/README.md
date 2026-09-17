@@ -5,8 +5,9 @@ Next.js App Router + TypeScript. No UI framework, no chart library.
 ```bash
 npm install
 npm run dev          # http://localhost:3000
+npm test             # 20 tests, no network
+npm run typecheck
 npm run build
-npx tsc --noEmit     # typecheck
 ```
 
 Expects the API on `http://localhost:8000`. Override with
@@ -25,9 +26,26 @@ components/
   TableView.tsx      the accessible twin of every chart
   AuthGate.tsx       demo sign-in
 lib/
-  api.ts             typed client, token handling
+  api.ts             typed client; clears the token on an authenticated 401
+  auth.ts            token store + subscription
   format.ts          formatters + the fixed series-colour map
 ```
+
+## Auth
+
+`lib/auth.ts` owns the token and notifies subscribers when it changes, so a 401
+anywhere drops every mounted component back to the sign-in card without a
+context provider.
+
+This matters because a stored token can stop working while remaining perfectly
+well-formed: it expires, or the account it names is deleted (a reset database).
+Both return an identical 401 — deliberately, so the endpoint cannot be used to
+probe which accounts exist. Without the self-heal the UI renders that error
+forever and the only escape is clearing `localStorage` by hand.
+
+The clear is guarded on whether the request was authenticated, because
+`/auth/login` also answers 401 for a wrong password and signing the user out
+mid-login attempt would be nonsense.
 
 ## Charts
 
