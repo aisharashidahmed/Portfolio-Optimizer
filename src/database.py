@@ -1,55 +1,86 @@
-# src/database.py
+"""Database engine, session management, and ORM models."""
 
-from sqlalchemy import create_engine, Column, String, Float, DateTime, JSON, Integer, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from datetime import datetime
-import os
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
-# --- 1. Connect to the Vault (PostgreSQL) ---
-# "postgresql://用户名:密码@地址:端口/数据库名"
-# For local development, no password is usually set.
-DATABASE_URL = "postgresql://localhost/portfolio_db"
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+)
+from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
-engine = create_engine(DATABASE_URL)
+from src.config import get_settings
+
+settings = get_settings()
+
+# check_same_thread is a SQLite-only flag; passing it to Postgres raises.
+connect_args = (
+    {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+)
+
+engine = create_engine(
+    settings.database_url,
+    connect_args=connect_args,
+    pool_pre_ping=True,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- 2. Define the Index Cards (Models) ---
+
+def utcnow() -> datetime:
+    """Timezone-aware UTC. ``datetime.utcnow()`` is deprecated and naive."""
+    return datetime.now(UTC)
+
 
 class User(Base):
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationship: One user can have many optimization runs
-    optimizations = relationship("OptimizationRun", back_populates="user")
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    optimizations = relationship(
+        "OptimizationRun", back_populates="user", cascade="all, delete-orphan"
+    )
+
 
 class OptimizationRun(Base):
     __tablename__ = "optimizations"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    
-    # Inputs
-    tickers = Column(JSON)  # e.g., ["AAPL", "MSFT"]
-    algorithm = Column(String)  # "hrp" or "mvo"
-    start_date = Column(String)
-    end_date = Column(String)
-    
-    # Outputs
-    weights = Column(JSON)  # e.g., [0.26, 0.12, ...]
-    
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationship back to user
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+
+    task_id = Column(String, unique=True, index=True)
+
+    tickers = Column(JSON, nullable=False)
+    algorithm = Column(String, nullable=False)
+    start_date = Column(String, nullable=False)
+    end_date = Column(String, nullable=False)
+
+    weights = Column(JSON, nullable=False)
+    metrics = Column(JSON)
+
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
     user = relationship("User", back_populates="optimizations")
 
-# --- 3. Create the Tables (Build the filing system) ---
-def init_db():
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency. Guarantees the session is closed on every path."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db() -> None:
     Base.metadata.create_all(bind=engine)
-    print("📁 Archive tables created successfully!")

@@ -1,0 +1,31 @@
+[project]
+name = "portfolio-optimizer"
+version = "0.1.0"
+description = "Portfolio optimization and backtesting across US and Kenyan markets"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+markers = [
+    "network: test requires live network access (deselect with '-m \"not network\"')",
+    "integration: test requires Redis/Postgres running",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/__pycache__/*", "*/tests/*"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",  # line length is handled by the formatter
+    # B008: FastAPI's dependency-injection idiom is Depends() in a default
+    # argument. Flagging it would mean fighting the framework.
+    "B008",
+]

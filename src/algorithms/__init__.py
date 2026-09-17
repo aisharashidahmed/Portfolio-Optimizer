@@ -1,3 +1,14 @@
+"""Portfolio allocation strategies, all conforming to :class:`BaseOptimizer`."""
+
 from .base import BaseOptimizer
-# from .mvo import MVOOptimizer   # We will uncomment this later
-# from .hrp import HRPOptimizer   # We will uncomment this later
+from .equal_weight import EqualWeightOptimizer, create_equal_weights
+from .hrp import HRPOptimizer
+from .mvo import MVOOptimizer
+
+__all__ = [
+    "BaseOptimizer",
+    "EqualWeightOptimizer",
+    "HRPOptimizer",
+    "MVOOptimizer",
+    "create_equal_weights",
+]

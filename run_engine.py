@@ -1,43 +1,84 @@
-# run_engine.py
-# This is the "Switchboard" that turns on the HRP Robot.
-
-import numpy as np
-import pandas as pd
-import yfinance as yf
-
-# Import your HRP robot from the engine room
+from src.algorithms.equal_weight import create_equal_weights
 from src.algorithms.mvo import MVOOptimizer
+from src.data_fetcher import prepare_market_data
+from src.metrics import calculate_portfolio_metrics
 
-print("="*60)
-print("STARTING THE HRP ROBOT TEST")
-print("="*60)
 
-# 1. Feed the robot with data
-tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'JPM']
-print(f"\n[1] Fetching data for: {tickers}...")
-data = yf.download(tickers, start='2020-01-01', end='2025-01-01', auto_adjust=False)['Adj Close']
-daily_returns = data.pct_change().dropna()
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "JPM"]
+start_date = "2020-01-01"
+end_date = "2025-01-01"
+risk_free_rate = 0.04
 
-annual_returns = daily_returns.mean() * 252
-cov_matrix = daily_returns.cov() * 252
+market_data = prepare_market_data(
+    tickers,
+    start_date,
+    end_date,
+)
 
-print(f"\n[2] Data fetched. Annual Returns:")
-print(annual_returns.round(4))
+daily_returns = market_data["daily_returns"]
+expected_returns = (
+    market_data["expected_annual_returns"].to_numpy()
+)
+annual_covariance_dataframe = market_data["annual_covariance"]
+annual_covariance_array = annual_covariance_dataframe.to_numpy()
 
-# 2. Build the HRP robot
-print(f"\n[3] Initializing HRP Robot...")
-mvo_robot = MVOOptimizer()
+asset_names = list(daily_returns.columns)
+asset_count = len(asset_names)
 
-# 3. Tell the robot to optimize
-print(f"[4] HRP Robot is walking the tree...")
-weights = mvo_robot.optimize(daily_returns, cov_matrix)
+mvo = MVOOptimizer(
+    risk_free_rate=risk_free_rate,
+    max_weight=0.40,
+)
 
-# 4. Display the results
-print(f"\n[5] FINAL OPTIMAL WEIGHTS:")
-for ticker, weight in zip(tickers, weights):
-    print(f"    {ticker}: {weight:.2%}")
+mvo_weights = mvo.optimize(
+    daily_returns,
+    annual_covariance_dataframe,
+)
 
-print(f"\n[6] Verification: Sum of weights = {np.sum(weights):.4f} (should be 1.0)")
-print("\n" + "="*60)
-print("HRP ROBOT TEST COMPLETE!")
-print("="*60)
+equal_weights = create_equal_weights(asset_count)
+
+mvo_metrics = calculate_portfolio_metrics(
+    mvo_weights,
+    expected_returns,
+    annual_covariance_array,
+    risk_free_rate,
+)
+
+equal_metrics = calculate_portfolio_metrics(
+    equal_weights,
+    expected_returns,
+    annual_covariance_array,
+    risk_free_rate,
+)
+
+
+def print_portfolio(name, weights, metrics):
+    print(f"\n{name}")
+    print("-" * len(name))
+
+    for ticker, weight in zip(asset_names, weights):
+        print(f"{ticker}: {weight:.2%}")
+
+    print(
+        "Expected annual return:",
+        f"{metrics['expected_annual_return']:.2%}",
+    )
+    print(
+        "Annual volatility:",
+        f"{metrics['annual_volatility']:.2%}",
+    )
+    print(
+        "Sharpe ratio:",
+        f"{metrics['sharpe_ratio']:.2f}",
+    )
+
+
+print_portfolio("MVO Portfolio", mvo_weights, mvo_metrics)
+print_portfolio(
+    "Equal-Weight Portfolio",
+    equal_weights,
+    equal_metrics,
+)
+
+if market_data["missing_tickers"]:
+    print("\nMissing tickers:", market_data["missing_tickers"])

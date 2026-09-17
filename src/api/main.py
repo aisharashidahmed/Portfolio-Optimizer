@@ -1,159 +1,191 @@
-# src/api/main.py
-from fastapi import FastAPI, HTTPException, Depends
+"""FastAPI application.
+
+Two optimization paths are exposed deliberately:
+
+* ``POST /optimize/sync``  -- runs inline. Fine for small universes, and it
+  means the API is fully usable with no broker running.
+* ``POST /optimize``       -- enqueues onto Celery. Used for large universes and
+  for the ingestion-backed jobs added in later phases.
+"""
+
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from celery.result import AsyncResult
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import redis
-import json
+from sqlalchemy.orm import Session
 
-from src.algorithms.hrp import HRPOptimizer
-from src.algorithms.mvo import MVOOptimizer
-from src.tasks import run_optimization
-from src.auth import get_password_hash, verify_password, create_access_token, get_current_user
-from src.database import SessionLocal, User
+from src.api.schemas import (
+    HealthResponse,
+    LoginCredentials,
+    OptimizationRunOut,
+    OptimizationSyncResponse,
+    OptimizeRequest,
+    SignupCredentials,
+    TaskAccepted,
+    TaskStatus,
+    TokenResponse,
+)
+from src.auth import (
+    create_access_token,
+    get_current_user,
+    get_password_hash,
+    verify_password,
+)
+from src.config import get_settings
+from src.database import OptimizationRun, User, get_db, init_db
+from src.services.optimization import (
+    InsufficientDataError,
+    UnknownAlgorithmError,
+    run_optimization,
+)
+from src.tasks import celery_app, optimize_task
 
-# Import our Engine Room machines (the robots we built)
-from src.algorithms.hrp import HRPOptimizer
-from src.algorithms.mvo import MVOOptimizer
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
-# --- 1. The Mailbox (Pydantic Models) ---
-class OptimizationRequest(BaseModel):
-    tickers: List[str]
-    start_date: str
-    end_date: str
-    algorithm: str
-    max_weight: Optional[float] = 0.20
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    init_db()
+    yield
 
-class OptimizationResponse(BaseModel):
-    tickers: List[str]
-    weights: List[float]
-    algorithm: str
-    status: str
 
-class UserCreate(BaseModel):
-    email: str
-    password: str
-
-class UserLogin(BaseModel):
-    email: str
-    password: str
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-
-# --- 2. The Front Door (FastAPI App) - THIS IS THE "app" THE ELECTRICIAN IS LOOKING FOR! ---
-app = FastAPI(title="Portfolio Optimizer Engine", version="1.0.0")
-# --- CORS: Allow requests from browsers ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (for development)
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers
+app = FastAPI(
+    title="Portfolio Optimizer",
+    description="Portfolio optimization and backtesting across US and Kenyan markets.",
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
-# --- 3. Helper: Data Fetcher ---
-def fetch_data(tickers, start_date, end_date):
-    data = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False)['Adj Close']
-    daily_returns = data.pct_change().dropna()
-    cov_matrix = daily_returns.cov() * 252
-    return daily_returns, cov_matrix
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
-# --- 4. The Dispatcher (The Endpoint) ---
-@app.post("/auth/signup", response_model=TokenResponse)
-async def signup(user_data: UserCreate):
-    db = SessionLocal()
-    # Check if user exists
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        db.close()
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Create new user
-    hashed_password = get_password_hash(user_data.password)
-    new_user = User(email=user_data.email, hashed_password=hashed_password)
-    db.add(new_user)
+
+# --------------------------------------------------------------------------
+# Auth
+# --------------------------------------------------------------------------
+@app.post(
+    "/auth/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED
+)
+def signup(
+    credentials: SignupCredentials, db: Session = Depends(get_db)
+) -> TokenResponse:
+    if db.query(User).filter(User.email == credentials.email).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Email already registered"
+        )
+
+    user = User(
+        email=credentials.email,
+        hashed_password=get_password_hash(credentials.password),
+    )
+    db.add(user)
     db.commit()
-    db.refresh(new_user)
-    db.close()
-    
-    # Create token
-    access_token = create_access_token(data={"sub": new_user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+
+    return TokenResponse(access_token=create_access_token({"sub": user.email}))
+
 
 @app.post("/auth/login", response_model=TokenResponse)
-async def login(user_data: UserLogin):
-    db = SessionLocal()
-    user = db.query(User).filter(User.email == user_data.email).first()
-    db.close()
-    
-    if not user or not verify_password(user_data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+def login(credentials: LoginCredentials, db: Session = Depends(get_db)) -> TokenResponse:
+    user = db.query(User).filter(User.email == credentials.email).first()
 
-@app.post("/optimize", response_model=dict)
-async def optimize_portfolio(
-    request: OptimizationRequest,
-    current_user: User = Depends(get_current_user)  # <-- The Bouncer!
-):
-    # 1. Validate the algorithm
-    if request.algorithm not in ["hrp", "mvo"]:
-        raise HTTPException(status_code=400, detail="Algorithm must be 'hrp' or 'mvo'")
+    # Same error for "no such user" and "wrong password" so the endpoint cannot
+    # be used to enumerate registered email addresses.
+    if user is None or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
 
-    # 2. Submit the task to Celery
-    task = run_optimization.delay(
+    return TokenResponse(access_token=create_access_token({"sub": user.email}))
+
+
+# --------------------------------------------------------------------------
+# Optimization
+# --------------------------------------------------------------------------
+@app.post("/optimize/sync", response_model=OptimizationSyncResponse)
+def optimize_sync(
+    request: OptimizeRequest,
+    current_user: User = Depends(get_current_user),
+) -> OptimizationSyncResponse:
+    try:
+        result = run_optimization(
+            tickers=request.tickers,
+            start_date=request.start_date.isoformat(),
+            end_date=request.end_date.isoformat(),
+            algorithm=request.algorithm,
+            risk_free_rate=settings.risk_free_rate,
+            max_weight=request.max_weight,
+        )
+    except (UnknownAlgorithmError, InsufficientDataError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    return OptimizationSyncResponse(**result.to_dict())
+
+
+@app.post("/optimize", response_model=TaskAccepted, status_code=status.HTTP_202_ACCEPTED)
+def optimize_async(
+    request: OptimizeRequest,
+    current_user: User = Depends(get_current_user),
+) -> TaskAccepted:
+    task = optimize_task.delay(
         tickers=request.tickers,
-        start_date=request.start_date,
-        end_date=request.end_date,
+        start_date=request.start_date.isoformat(),
+        end_date=request.end_date.isoformat(),
         algorithm=request.algorithm,
         max_weight=request.max_weight,
-        user_id=current_user.id  # <-- Pass the logged-in user's ID!
+        user_id=current_user.id,
     )
-    return {
-        "task_id": task.id,
-        "status": "Processing started",
-        "message": "Use GET /status/{task_id} to check the result."
-    }
+    return TaskAccepted(task_id=task.id)
 
-redis_client = redis.Redis(host='localhost', port=6379, db=0)
 
-@app.get("/status/{task_id}")
-async def get_status(task_id: str):
-    """
-    Checks the status of a submitted task by reading directly from Redis.
-    """
-    # Try to get the result from Redis
-    result_data = redis_client.get(f"task:{task_id}")
-    
-    if result_data is None:
-        # Check if the task is still pending or failed via Celery
-        task = run_optimization.AsyncResult(task_id)
-        if task.pending:
-            return {"task_id": task_id, "status": "PENDING", "result": None}
-        elif task.failed():
-            return {"task_id": task_id, "status": "FAILED", "result": str(task.info)}
-        else:
-            return {"task_id": task_id, "status": "UNKNOWN", "result": None}
-    
-    # Decode the result
-    try:
-        result = json.loads(result_data.decode('utf-8'))
-        return {
-            "task_id": task_id,
-            "status": "SUCCESS",
-            "result": result
-        }
-    except:
-        return {"task_id": task_id, "status": "ERROR", "result": "Failed to parse result"}
+@app.get("/tasks/{task_id}", response_model=TaskStatus)
+def get_task_status(
+    task_id: str, current_user: User = Depends(get_current_user)
+) -> TaskStatus:
+    """Read task state from Celery's result backend, the single source of truth."""
+    async_result = AsyncResult(task_id, app=celery_app)
+    state = async_result.state
 
-# --- 5. Health Check ---
-@app.get("/health")
-async def health_check():
-    return {"status": "Control Room is operational!"}
+    if state == "SUCCESS":
+        return TaskStatus(task_id=task_id, state=state, result=async_result.result)
+
+    if state == "FAILURE":
+        return TaskStatus(task_id=task_id, state=state, error=str(async_result.result))
+
+    # PENDING also covers unknown task ids -- Celery cannot distinguish them.
+    return TaskStatus(task_id=task_id, state=state)
+
+
+@app.get("/history", response_model=list[OptimizationRunOut])
+def get_history(
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[OptimizationRun]:
+    return (
+        db.query(OptimizationRun)
+        .filter(OptimizationRun.user_id == current_user.id)
+        .order_by(OptimizationRun.created_at.desc())
+        .limit(min(limit, 100))
+        .all()
+    )
+
+
+@app.get("/health", response_model=HealthResponse)
+def health_check() -> HealthResponse:
+    return HealthResponse(status="ok", environment=settings.environment)

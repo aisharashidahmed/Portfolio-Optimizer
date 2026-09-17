@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Redis / local service state
+dump.rdb
+*.rdb
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Data artifacts (raw scrapes are regenerable; curated datasets are tracked explicitly)
+data/raw/
+data/cache/
+*.db-journal
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Node (frontend, added in Phase 4)
+node_modules/
+.next/
+out/
