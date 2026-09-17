@@ -222,6 +222,13 @@ than checking cases we thought of. It found three real problems:
    preserves variances exactly, so it cannot repair that. The test now asserts
    what shrinkage *does* guarantee: a non-singular result.
 
+## Documentation
+
+- **[docs/STUDY_GUIDE.md](docs/STUDY_GUIDE.md)** — how the non-obvious parts
+  work and why: HRP's avoidance of matrix inversion, what the Ledoit-Wolf
+  shrinkage intensity means, why no-lookahead needs structural enforcement, the
+  bugs property-based testing found, and the project's known limitations.
+
 ## Configuration
 
 All configuration is environment-driven via `src/config.py`; nothing secret is
