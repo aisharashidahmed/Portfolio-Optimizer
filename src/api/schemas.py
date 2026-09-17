@@ -51,6 +51,10 @@ class OptimizeRequest(BaseModel):
     end_date: date
     algorithm: Literal["hrp", "mvo", "equal_weight"]
     max_weight: float = Field(default=0.20, gt=0.0, le=1.0)
+    # Shrinkage is the default: the sample estimator is noisy enough that MVO
+    # optimizes against its own estimation error. "sample" is kept so the two
+    # can be compared.
+    covariance_estimator: Literal["ledoit_wolf", "sample"] = "ledoit_wolf"
 
     @field_validator("tickers")
     @classmethod
@@ -111,6 +115,7 @@ class OptimizationSyncResponse(BaseModel):
     algorithm: str
     metrics: PortfolioMetrics
     missing_tickers: list[str] = Field(default_factory=list)
+    covariance_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class TaskAccepted(BaseModel):

@@ -14,6 +14,7 @@ from src.algorithms.hrp import HRPOptimizer
 from src.algorithms.mvo import MVOOptimizer
 from src.data_fetcher import prepare_market_data
 from src.metrics import calculate_portfolio_metrics
+from src.risk.covariance import estimate_covariance
 
 ALGORITHMS = {"hrp", "mvo", "equal_weight"}
 
@@ -33,6 +34,7 @@ class OptimizationResult:
     algorithm: str
     metrics: dict[str, float]
     missing_tickers: list[str] = field(default_factory=list)
+    covariance_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +43,7 @@ class OptimizationResult:
             "algorithm": self.algorithm,
             "metrics": self.metrics,
             "missing_tickers": self.missing_tickers,
+            "covariance_diagnostics": self.covariance_diagnostics,
         }
 
 
@@ -66,6 +69,7 @@ def run_optimization(
     algorithm: str,
     risk_free_rate: float,
     max_weight: float = 0.20,
+    covariance_estimator: str = "ledoit_wolf",
 ) -> OptimizationResult:
     """Fetch market data, allocate capital, and measure the resulting portfolio."""
     optimizer = build_optimizer(algorithm, risk_free_rate, max_weight)
@@ -73,7 +77,6 @@ def run_optimization(
     market_data = prepare_market_data(tickers, start_date, end_date)
 
     daily_returns = market_data["daily_returns"]
-    covariance = market_data["annual_covariance"]
     surviving_tickers = list(daily_returns.columns)
 
     if len(surviving_tickers) < 2:
@@ -90,6 +93,13 @@ def run_optimization(
             f"assets; weights could sum to at most "
             f"{len(surviving_tickers) * max_weight:.2f}, not 1.0."
         )
+
+    # Shrinkage by default: the raw sample covariance is noisy enough that
+    # MVO will happily optimize against its estimation error.
+    covariance_estimate = estimate_covariance(
+        daily_returns, estimator=covariance_estimator
+    )
+    covariance = covariance_estimate.matrix
 
     weights = optimizer.optimize(daily_returns, covariance)
 
@@ -108,4 +118,5 @@ def run_optimization(
         algorithm=algorithm,
         metrics={k: float(v) for k, v in metrics.items()},
         missing_tickers=list(market_data["missing_tickers"]),
+        covariance_diagnostics=covariance_estimate.summary(),
     )

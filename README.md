@@ -19,11 +19,13 @@ a footnote.
 
 - **Three allocation strategies** behind one interface — Hierarchical Risk
   Parity, Mean-Variance Optimization, and an equal-weight benchmark
-- **Out-of-sample backtesting** — weights are learned on a training window and
-  applied, frozen, to unseen data
+- **Ledoit-Wolf covariance shrinkage**, implemented from the paper rather than
+  imported, with the optimal shrinkage intensity derived analytically
+- **Walk-forward backtesting** with weight drift, per-rebalance transaction
+  costs, and structurally enforced no-lookahead
 - **REST API** with JWT auth, request validation, and per-user run history
 - **Async job queue** for optimizations too slow to run inline
-- **58 tests**, 89% line coverage, no network access required to run them
+- **157 tests**, 92% line coverage, no network access required to run them
 
 ## Quickstart
 
@@ -49,6 +51,36 @@ python run_engine.py      # compare MVO against equal-weight
 python run_backtest.py    # train/test split, out-of-sample results
 ```
 
+## What the backtest actually says
+
+Ten years of daily data, eight US large-caps, monthly rebalancing, 10bp costs:
+
+| Strategy | Ann. return | Ann. vol | Sharpe | Max DD | Avg turnover | Cost drag |
+|---|---|---|---|---|---|---|
+| **Equal weight** | 20.48% | 18.31% | **0.900** | −30.08% | 5.24% | 3.02% |
+| HRP | 14.83% | 15.59% | 0.695 | −28.65% | 16.16% | 6.09% |
+| MVO | 17.22% | 21.15% | 0.625 | −27.16% | 37.02% | 17.00% |
+
+**The naive baseline wins.** This is not a bug, and it is the most useful thing
+the project has to say. It reproduces DeMiguel, Garlappi & Uppal (2009): once
+you account for estimation error and trading costs, 1/N is very hard to beat.
+
+The mechanism is visible in the last two columns. MVO turns over 37% of the
+portfolio per rebalance because small changes in estimated expected returns
+produce large changes in optimal weights, and that instability costs 17% of
+cumulative return. Watch it degrade as costs rise:
+
+| Cost | Equal weight | HRP | MVO |
+|---|---|---|---|
+| 0bp | 0.904 | 0.709 | 0.650 |
+| 25bp | 0.894 | 0.673 | 0.588 |
+| 100bp | 0.862 | 0.565 | **0.405** |
+
+A backtest that ignored transaction costs and weight drift would have reported
+MVO's gross numbers and called it a success.
+
+Reproduce with `python run_backtest.py`.
+
 ## Architecture
 
 ```
@@ -70,13 +102,14 @@ python run_backtest.py    # train/test split, out-of-sample results
               │   optimization.py    │
               └──────────┬───────────┘
                          │
-         ┌───────────────┼────────────────┐
-         ▼               ▼                ▼
-  ┌────────────┐  ┌─────────────┐  ┌────────────┐
-  │data_fetcher│  │ algorithms  │  │  metrics   │
-  │ (provider  │  │ hrp·mvo·1/N │  │ return·vol │
-  │  boundary) │  │             │  │  ·sharpe   │
-  └────────────┘  └─────────────┘  └────────────┘
+    ┌──────┬─────────┼──────────┬──────────────┐
+    ▼      ▼         ▼          ▼              ▼
+┌────────┐┌────────┐┌────────┐┌──────────┐┌───────────┐
+│  data  ││  risk  ││ algor- ││ backtest ││  metrics  │
+│fetcher ││covari- ││ ithms  ││ walk-fwd ││ return·   │
+│(provi- ││ance    ││hrp·mvo ││ +costs   ││ vol·sharpe│
+│der bdy)││shrink  ││·1/N    ││ +drift   ││           │
+└────────┘└────────┘└────────┘└──────────┘└───────────┘
 ```
 
 Two design decisions worth calling out:
@@ -113,6 +146,29 @@ synthetic data with true pairwise correlations near zero, it produced
 correlations near −0.4, so every allocation was clustering on noise.
 `tests/test_hrp.py::test_recovers_the_true_correlation_matrix` pins the fix.
 
+### Covariance estimation
+
+With N assets you estimate N(N+1)/2 covariance parameters; at N=50 that is
+1,275 numbers from maybe 500 observations. Mean-variance optimization then
+actively seeks out the noise, loading up on whichever pair *appears* most
+negatively correlated — usually the pair estimated worst.
+
+`src/risk/covariance.py` implements Ledoit-Wolf shrinkage toward a
+constant-correlation target. The shrinkage intensity is derived, not tuned. On
+simulated data drawn from a known covariance matrix, it is closer to the truth
+than the sample estimator on **≥80% of individual draws**, and it repairs
+matrices the sample estimator leaves singular:
+
+| Assets | Observations | δ | cond(sample) | cond(shrunk) |
+|---|---|---|---|---|
+| 10 | 1000 | 0.096 | 20.5 | 20.0 |
+| 50 | 300 | 0.185 | 220.6 | 171.5 |
+| 100 | 110 | 0.373 | 247,809 | **566** |
+
+The vectorised implementation is cross-checked against a deliberately slow,
+literal transcription of the paper's formulas, agreeing to 1e-12 across five
+different matrix shapes (`tests/test_covariance.py`).
+
 ## Testing
 
 ```bash
@@ -131,13 +187,40 @@ Tests are organised by behaviour, not by coverage target:
 
 - **Financial invariants** — weights sum to 1, no shorts, the weight cap is
   respected, riskier assets get less
+- **No-lookahead** — corrupt every observation after a cutoff, re-run, and
+  assert no weight before the cutoff moved. If one did, the optimizer saw its
+  own future and every performance number is fiction
 - **Provider hostility** — delisted tickers, all-NaN columns, sparse history,
-  yfinance's shape changing between one ticker and many, mismatched trading
-  calendars
+  yfinance's shape changing between one ticker and many, mismatched calendars
 - **Security** — login returns an identical response for an unknown email and a
   wrong password, so the endpoint can't be used to enumerate users
-- **Infeasible input** — 3 assets capped at 20% can never sum to 100%, and the
-  API rejects that before it reaches the solver
+- **Reference cross-check** — the vectorised Ledoit-Wolf code is verified
+  against a literal loop-by-loop transcription of the published formulas
+
+### Property-based testing
+
+`tests/test_properties.py` uses Hypothesis to search for counterexamples rather
+than checking cases we thought of. It found three real problems:
+
+1. **HRP was not permutation-invariant.** Given three assets whose pairwise
+   correlation distances were all exactly equal, there is no canonical
+   dendrogram — scipy breaks the tie by index order, so reordering the input
+   changed the allocation. `HRPOptimizer` now detects total degeneracy and
+   falls back to inverse-variance weighting, which is the order-independent
+   limit of HRP. Partial ties remain order-dependent; that is a property of
+   hierarchical clustering itself and is documented rather than hidden.
+2. **MVO produced NaN objectives.** SLSQP's line search probes just outside the
+   feasible set, where floating-point error makes `w'Σw` slightly negative;
+   `sqrt` of that is NaN, which poisoned the objective and caused spurious
+   convergence failures. The quadratic form is now floored at zero, and the
+   solver retries from several feasible starting points before giving up.
+3. **"Shrinkage always improves conditioning" is false.** Hypothesis disproved
+   the intuitive claim twice — once on an already well-conditioned matrix
+   (1.5622 → 1.5843) and, more interestingly, on one whose ill-conditioning came
+   from variances spanning three orders of magnitude rather than from
+   correlation structure (260.93 → 263.02). The constant-correlation target
+   preserves variances exactly, so it cannot repair that. The test now asserts
+   what shrinkage *does* guarantee: a non-singular result.
 
 ## Configuration
 
@@ -157,7 +240,8 @@ known key.
 ## Roadmap
 
 - [x] **Phase 0** — Correct HRP, single data path, environment config, API test suite
-- [ ] **Phase 1** — Covariance shrinkage, transaction costs, property-based tests
+- [x] **Phase 1** — Ledoit-Wolf shrinkage, walk-forward backtesting with costs,
+      property-based tests
 - [ ] **Phase 2** — NSE ingestion pipeline and KES/USD currency-risk decomposition
 - [ ] **Phase 3** — Alembic migrations, Docker Compose, structured logging
 - [ ] **Phase 4** — Next.js + TypeScript frontend

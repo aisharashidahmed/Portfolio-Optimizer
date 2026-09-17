@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from src.algorithms.mvo import OptimizationFailedError
 from src.api.schemas import (
     HealthResponse,
     LoginCredentials,
@@ -124,8 +125,9 @@ def optimize_sync(
             algorithm=request.algorithm,
             risk_free_rate=settings.risk_free_rate,
             max_weight=request.max_weight,
+            covariance_estimator=request.covariance_estimator,
         )
-    except (UnknownAlgorithmError, InsufficientDataError) as exc:
+    except (UnknownAlgorithmError, InsufficientDataError, OptimizationFailedError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from exc

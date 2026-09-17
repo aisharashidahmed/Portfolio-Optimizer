@@ -1,97 +1,90 @@
-from src.algorithms.equal_weight import create_equal_weights
-from src.algorithms.mvo import MVOOptimizer
-from src.backtester import (
-    calculate_portfolio_daily_returns,
-    calculate_cumulative_returns,
-)
+"""Walk-forward backtest comparing every strategy on the same data.
+
+Unlike a single train/test split, this re-fits the optimizer on a rolling
+window and steps forward, so the result reflects many independent decisions
+rather than one lucky period. Costs are charged on every rebalance.
+
+    python run_backtest.py
+"""
+
+import pandas as pd
+
+from src.algorithms import EqualWeightOptimizer, HRPOptimizer, MVOOptimizer
+from src.backtesting import compare_strategies, run_walk_forward
 from src.data_fetcher import prepare_market_data
 
+TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "JPM", "JNJ", "XOM", "PG"]
+START_DATE = "2015-01-01"
+END_DATE = "2025-01-01"
+RISK_FREE_RATE = 0.04
 
-tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "JPM"]
-risk_free_rate = 0.04
+TRAINING_DAYS = 252  # one year of history to fit on
+REBALANCE_EVERY = 21  # roughly monthly
+TRANSACTION_COST_BPS = 10.0  # 10bp per unit traded
 
-# 1. Fetch two separate periods
-training_data = prepare_market_data(
-    tickers,
-    "2020-01-01",
-    "2024-01-01",
-)
 
-testing_data = prepare_market_data(
-    tickers,
-    "2024-01-01",
-    "2025-01-01",
-)
+def main() -> None:
+    print(f"Fetching {len(TICKERS)} tickers, {START_DATE} to {END_DATE}...")
+    market_data = prepare_market_data(TICKERS, START_DATE, END_DATE)
+    daily_returns = market_data["daily_returns"]
 
-if training_data["missing_tickers"] or testing_data["missing_tickers"]:
-    raise ValueError("Some requested tickers are unavailable")
+    if market_data["missing_tickers"]:
+        print(f"  unavailable: {market_data['missing_tickers']}")
+    print(f"  {len(daily_returns)} observations x {daily_returns.shape[1]} assets")
 
-# 2. Preserve the training column order
-asset_names = list(training_data["daily_returns"].columns)
+    strategies = {
+        "Equal weight": EqualWeightOptimizer(),
+        "HRP": HRPOptimizer(),
+        "MVO": MVOOptimizer(risk_free_rate=RISK_FREE_RATE, max_weight=0.35),
+    }
 
-training_returns = training_data["daily_returns"][asset_names]
-training_covariance = training_data["annual_covariance"].loc[
-    asset_names,
-    asset_names,
-]
-
-testing_returns = testing_data["daily_returns"][asset_names]
-
-# 3. Learn weights using training data only
-mvo = MVOOptimizer(
-    risk_free_rate=risk_free_rate,
-    max_weight=0.40,
-)
-
-mvo_weights = mvo.optimize(
-    training_returns,
-    training_covariance,
-)
-
-equal_weights = create_equal_weights(len(asset_names))
-
-# 4. Apply frozen weights to unseen testing data
-mvo_daily_returns = calculate_portfolio_daily_returns(
-    testing_returns,
-    mvo_weights,
-)
-
-equal_daily_returns = calculate_portfolio_daily_returns(
-    testing_returns,
-    equal_weights,
-)
-
-# 5. Compound the daily returns
-mvo_cumulative_returns = calculate_cumulative_returns(
-    mvo_daily_returns
-)
-
-equal_cumulative_returns = calculate_cumulative_returns(
-    equal_daily_returns
-)
-
-# 6. Display the learned allocations and unseen performance
-print("\nWeights learned from training data")
-print("----------------------------------")
-
-for ticker, mvo_weight, equal_weight in zip(
-    asset_names,
-    mvo_weights,
-    equal_weights,
-):
     print(
-        f"{ticker}: "
-        f"MVO {mvo_weight:.2%} | "
-        f"Equal {equal_weight:.2%}"
+        f"\nWalk-forward: fit on {TRAINING_DAYS}d, rebalance every "
+        f"{REBALANCE_EVERY}d, {TRANSACTION_COST_BPS:.0f}bp costs\n"
     )
 
-print("\nOut-of-sample results")
-print("---------------------")
-print(
-    "MVO cumulative return:",
-    f"{mvo_cumulative_returns.iloc[-1]:.2%}",
-)
-print(
-    "Equal-weight cumulative return:",
-    f"{equal_cumulative_returns.iloc[-1]:.2%}",
-)
+    table = compare_strategies(
+        daily_returns,
+        strategies,
+        training_days=TRAINING_DAYS,
+        rebalance_every=REBALANCE_EVERY,
+        transaction_cost_bps=TRANSACTION_COST_BPS,
+        risk_free_rate=RISK_FREE_RATE,
+    )
+
+    display = pd.DataFrame(
+        {
+            "Ann. return": table["annualised_return"].map("{:.2%}".format),
+            "Ann. vol": table["annualised_volatility"].map("{:.2%}".format),
+            "Sharpe": table["sharpe_ratio"].map("{:.3f}".format),
+            "Sortino": table["sortino_ratio"].map("{:.3f}".format),
+            "Max DD": table["max_drawdown"].map("{:.2%}".format),
+            "Avg turnover": table["average_turnover"].map("{:.2%}".format),
+            "Cost drag": table["total_cost_drag"].map("{:.2%}".format),
+        }
+    )
+    print(display.to_string())
+
+    # Costs are not a rounding error -- show how each strategy degrades.
+    print("\nNet Sharpe as trading costs rise")
+    print("-" * 52)
+    header = "  ".join(f"{name:>14}" for name in strategies)
+    print(f"{'cost':>6}  {header}")
+    for bps in (0.0, 10.0, 25.0, 50.0, 100.0):
+        sharpes = [
+            run_walk_forward(
+                daily_returns,
+                optimizer,
+                training_days=TRAINING_DAYS,
+                rebalance_every=REBALANCE_EVERY,
+                transaction_cost_bps=bps,
+                risk_free_rate=RISK_FREE_RATE,
+            ).performance.sharpe_ratio
+            for optimizer in strategies.values()
+        ]
+        row = "  ".join(f"{s:>14.3f}" for s in sharpes)
+        print(f"{bps:>5.0f}bp  {row}")
+
+
+if __name__ == "__main__":
+    main()

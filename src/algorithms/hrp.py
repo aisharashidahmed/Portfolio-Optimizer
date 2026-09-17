@@ -47,6 +47,17 @@ def correlation_from_covariance(cov_matrix: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def inverse_variance_weights(cov_matrix: pd.DataFrame) -> np.ndarray:
+    """Allocate inversely to each asset's variance.
+
+    This is what HRP reduces to when the correlation structure carries no
+    clustering information, and it depends only on the diagonal, so it is
+    independent of asset ordering.
+    """
+    inverse_variance = 1.0 / np.diag(cov_matrix.to_numpy())
+    return inverse_variance / inverse_variance.sum()
+
+
 class HRPOptimizer(BaseOptimizer):
     """Allocate capital by recursively bisecting a correlation dendrogram."""
 
@@ -70,6 +81,19 @@ class HRPOptimizer(BaseOptimizer):
             index=correlation.index,
             columns=correlation.columns,
         )
+
+    @staticmethod
+    def _distances_are_degenerate(
+        distance_matrix: pd.DataFrame, tolerance: float = 1e-12
+    ) -> bool:
+        """True when every off-diagonal distance is effectively identical."""
+        values = distance_matrix.to_numpy()
+        off_diagonal = values[~np.eye(len(values), dtype=bool)]
+
+        if off_diagonal.size == 0:
+            return True
+
+        return bool(np.ptp(off_diagonal) <= tolerance)
 
     def _cluster(self, distance_matrix: pd.DataFrame) -> np.ndarray:
         condensed_distances = squareform(distance_matrix.to_numpy(), checks=False)
@@ -162,6 +186,20 @@ class HRPOptimizer(BaseOptimizer):
             return np.array([1.0])
 
         distance_matrix = self._get_distance_matrix(cov_matrix)
+
+        # When every pair of assets is equidistant there is no canonical
+        # dendrogram: scipy breaks the tie by index order, so permuting the
+        # inputs would silently change the allocation. Hypothesis found exactly
+        # this (three assets, all pairwise distances 0.713176). With no
+        # clustering signal to exploit, fall back to the order-independent
+        # limit of HRP.
+        #
+        # Note this only covers *total* degeneracy. Partial ties -- some pairs
+        # equidistant, others not -- remain order-dependent, which is a
+        # property of hierarchical clustering itself rather than of this code.
+        if self._distances_are_degenerate(distance_matrix):
+            return inverse_variance_weights(cov_matrix)
+
         linkage_matrix = self._cluster(distance_matrix)
 
         root_node = 2 * n_assets - 2

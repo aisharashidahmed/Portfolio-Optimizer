@@ -164,3 +164,52 @@ class TestHistory:
         response = client.get("/history", headers=auth_headers)
         assert response.status_code == 200
         assert response.json() == []
+
+
+class TestCovarianceEstimatorOption:
+    def test_shrinkage_is_the_default(self, client, auth_headers, fake_market_data):
+        response = client.post("/optimize/sync", json=VALID_REQUEST, headers=auth_headers)
+        diagnostics = response.json()["covariance_diagnostics"]
+        assert diagnostics["estimator"] == "ledoit_wolf"
+
+    def test_sample_estimator_can_be_requested(
+        self, client, auth_headers, fake_market_data
+    ):
+        payload = {**VALID_REQUEST, "covariance_estimator": "sample"}
+        response = client.post("/optimize/sync", json=payload, headers=auth_headers)
+
+        assert response.status_code == 200
+        diagnostics = response.json()["covariance_diagnostics"]
+        assert diagnostics["estimator"] == "sample"
+        assert diagnostics["shrinkage_intensity"] == 0.0
+
+    def test_diagnostics_report_data_adequacy(
+        self, client, auth_headers, fake_market_data
+    ):
+        response = client.post("/optimize/sync", json=VALID_REQUEST, headers=auth_headers)
+        diagnostics = response.json()["covariance_diagnostics"]
+
+        assert diagnostics["n_assets"] == 3
+        assert diagnostics["observations_per_asset"] > 0
+        assert 0.0 <= diagnostics["shrinkage_intensity"] <= 1.0
+
+    def test_unknown_estimator_is_rejected(self, client, auth_headers):
+        payload = {**VALID_REQUEST, "covariance_estimator": "magic"}
+        response = client.post("/optimize/sync", json=payload, headers=auth_headers)
+        assert response.status_code == 422
+
+    def test_the_two_estimators_disagree(self, client, auth_headers, fake_market_data):
+        """If shrinkage changed nothing, wiring it up would be pointless."""
+        shrunk = client.post(
+            "/optimize/sync",
+            json={**VALID_REQUEST, "covariance_estimator": "ledoit_wolf"},
+            headers=auth_headers,
+        ).json()
+        sample = client.post(
+            "/optimize/sync",
+            json={**VALID_REQUEST, "covariance_estimator": "sample"},
+            headers=auth_headers,
+        ).json()
+
+        assert shrunk["covariance_diagnostics"]["shrinkage_intensity"] > 0
+        assert shrunk["weights"] != sample["weights"]
