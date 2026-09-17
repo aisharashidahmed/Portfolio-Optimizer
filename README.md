@@ -27,14 +27,19 @@ a footnote.
   storage, schema-change detection, and a robots.txt-compliant crawl delay
 - **Currency risk decomposition** — splits a Kenyan investor's return on a US
   asset into the asset, the shilling, and the interaction between them
+- **Next.js + TypeScript frontend** with hand-rolled SVG charts on a
+  colour-vision-validated palette, a data table behind every chart, and
+  working light and dark modes
 - **REST API** with JWT auth, request validation, and per-user run history
 - **Async job queue** for optimizations too slow to run inline
-- **268 tests**, 91% line coverage, no network access required to run them
+- **277 tests**, 90% line coverage, no network access required to run them
 
 ## Quickstart
 
 Requires Python 3.11+. No database or Redis needed — it defaults to SQLite and
 runs the optimizer inline.
+
+**Backend:**
 
 ```bash
 git clone https://github.com/aisharashidahmed/Portfolio-Optimizer.git
@@ -44,9 +49,20 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 
 cp .env.example .env
-pytest                                    # 58 tests, ~10s, no network
+pytest                                    # 277 tests, ~20s, no network
 uvicorn src.api.main:app --reload         # API docs at localhost:8000/docs
 ```
+
+**Frontend** (in a second terminal):
+
+```bash
+cd frontend
+npm install
+npm run dev                               # http://localhost:3000
+```
+
+The UI signs in with a pre-filled demo account created on first use. The NSE
+page is public and needs no sign-in.
 
 Run the engine directly against live market data:
 
@@ -311,6 +327,34 @@ than checking cases we thought of. It found three real problems:
   shrinkage intensity means, why no-lookahead needs structural enforcement, the
   bugs property-based testing found, and the project's known limitations.
 
+## Frontend
+
+Next.js App Router with TypeScript, no UI framework and no chart library. The
+charts are hand-written SVG because the specifications this project follows are
+easier to hit exactly than to configure: 2px strokes, a 2px surface ring on
+overlapping markers, hairline solid gridlines, endpoint-only direct labels.
+
+Three decisions worth explaining:
+
+**The palette is validated, not chosen by eye.** The three categorical series
+slots were run through a colour-vision-deficiency checker against the exact
+light and dark surfaces used. Worst all-pairs separation is ΔE 9.2 light / 9.4
+dark against a floor of 8, and 24.0 / 20.9 against a normal-vision floor of 15.
+Aqua measures 2.74:1 on the light surface — below the 3:1 bar — so every chart
+using it also carries direct labels and a table view rather than letting colour
+alone carry the value.
+
+**Colour follows the entity, not its rank.** Each strategy is pinned to a slot
+in `lib/format.ts`, so filtering one out never repaints the survivors. A reader
+who learned that equal weight is blue keeps that.
+
+**Every chart has a table twin.** A tooltip enhances a value; it never gates
+it. `components/TableView.tsx` is the WCAG-clean equivalent of each chart and
+is one click away.
+
+There is no dual-axis chart anywhere. Two measures of different scale get two
+charts.
+
 ## Configuration
 
 All configuration is environment-driven via `src/config.py`; nothing secret is
@@ -333,7 +377,8 @@ known key.
       property-based tests
 - [x] **Phase 2** — NSE ingestion pipeline and KES/USD currency-risk decomposition
 - [ ] **Phase 3** — Alembic migrations, Docker Compose, structured logging
-- [ ] **Phase 4** — Next.js + TypeScript frontend
+      *(deferred: lower value than the UI for a reviewer who skims)*
+- [x] **Phase 4** — Next.js + TypeScript frontend
 - [ ] **Phase 5** — Retrieval over SEC EDGAR filings, then NSE annual reports
 
 ## Disclaimer

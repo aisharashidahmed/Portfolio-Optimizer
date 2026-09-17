@@ -147,3 +147,111 @@ class OptimizationRunOut(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     environment: str
+
+
+class BacktestRequest(OptimizeRequest):
+    """A backtest needs a longer window than a single optimization."""
+
+    training_days: int = Field(default=252, ge=30, le=1260)
+    rebalance_every: int = Field(default=21, ge=1, le=252)
+    transaction_cost_bps: float = Field(default=10.0, ge=0.0, le=1000.0)
+    strategies: list[Literal["equal_weight", "hrp", "mvo"]] | None = None
+
+    @model_validator(mode="after")
+    def check_window_leaves_out_of_sample(self) -> "BacktestRequest":
+        """Reject a window too short to leave anything out of sample.
+
+        ~252 trading days per calendar year; require at least 60 trading days
+        beyond the training window or the result is a single noisy period.
+        """
+        calendar_days = (self.end_date - self.start_date).days
+        approx_trading_days = calendar_days * 252 / 365
+
+        if approx_trading_days < self.training_days + 60:
+            raise ValueError(
+                f"A {self.training_days}-day training window needs roughly "
+                f"{(self.training_days + 60) * 365 / 252:.0f} calendar days of "
+                f"data; this range has {calendar_days}."
+            )
+        return self
+
+
+class CurvePoint(BaseModel):
+    date: str
+    value: float
+
+
+class StrategyResultOut(BaseModel):
+    strategy: str
+    curve: list[CurvePoint]
+    performance: dict[str, float]
+    final_weights: dict[str, float]
+    average_turnover: float
+    total_cost_drag: float
+    error: str | None = None
+
+
+class BacktestResponse(BaseModel):
+    tickers: list[str]
+    start_date: str
+    end_date: str
+    transaction_cost_bps: float
+    strategies: list[StrategyResultOut]
+
+
+class CurrencyRequest(BaseModel):
+    tickers: list[str] = Field(min_length=1, max_length=20)
+    start_date: date
+    end_date: date
+
+    @field_validator("tickers")
+    @classmethod
+    def normalise(cls, tickers: list[str]) -> list[str]:
+        cleaned, seen = [], set()
+        for raw in tickers:
+            ticker = raw.strip().upper()
+            if not TICKER_PATTERN.match(ticker):
+                raise ValueError(f"{raw!r} is not a valid ticker symbol")
+            if ticker not in seen:
+                seen.add(ticker)
+                cleaned.append(ticker)
+        if not cleaned:
+            raise ValueError("At least one ticker is required")
+        return cleaned
+
+    @model_validator(mode="after")
+    def check_window(self) -> "CurrencyRequest":
+        if self.end_date <= self.start_date:
+            raise ValueError("end_date must be after start_date")
+        if (self.end_date - self.start_date).days < MIN_HISTORY_DAYS:
+            raise ValueError(f"Date range must span at least {MIN_HISTORY_DAYS} days")
+        return self
+
+
+class FxSummary(BaseModel):
+    start_rate: float
+    end_rate: float
+    total_depreciation: float
+    curve: list[CurvePoint]
+
+
+class CurrencyResponse(BaseModel):
+    start_date: str
+    end_date: str
+    fx: FxSummary
+    assets: list[dict[str, Any]]
+
+
+class NseListingOut(BaseModel):
+    ticker: str
+    close_kes: float
+    volume: float | None = None
+    trade_date: str
+
+
+class NseCoverageResponse(BaseModel):
+    tickers_known: int
+    price_rows: int
+    latest_trade_date: str | None
+    usable_for_covariance: int
+    listings: list[NseListingOut]

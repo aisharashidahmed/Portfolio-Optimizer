@@ -542,7 +542,84 @@ is arguably *hedged* by holding dollars.
 
 ---
 
-## 10. Design decisions you should be able to justify
+## 10. The frontend
+
+**Priority: medium for backend roles, high if anyone asks "did you build the UI?"**
+
+### Why hand-written SVG instead of a chart library
+
+The specifications this project follows — 2px strokes, a 2px surface-coloured
+ring on overlapping markers, solid hairline gridlines, direct labels only at
+endpoints — are easier to hit exactly in SVG than to coax out of a library's
+theme API. It also removes a dependency and a version-upgrade surface.
+
+The honest counter-argument, which you should volunteer: for a larger app with
+many chart types this would be the wrong call, because you would end up
+rewriting a library badly. At three chart types it is the right trade.
+
+### Why the palette is validated rather than chosen
+
+The three series colours were run through a colour-vision-deficiency checker
+against the exact light and dark surfaces used. The numbers:
+
+| Check | Light | Dark | Floor |
+|---|---|---|---|
+| Worst all-pairs CVD ΔE | 9.2 | 9.4 | 8 |
+| Worst normal-vision ΔE | 24.0 | 20.9 | 15 |
+| Contrast vs surface | aqua 2.74:1 | all ≥ 3:1 | 3:1 |
+
+Aqua fails the light-mode contrast bar. That is *known*, not overlooked: every
+chart that uses it also ships direct labels and a table view, so colour never
+carries a value alone. Knowing which check your design fails, and what you did
+about it, is a stronger answer than claiming everything passed.
+
+### Three rules the charts follow
+
+**Colour follows the entity, never its rank.** Each strategy is pinned to a
+slot in `lib/format.ts`. Filtering one out does not repaint the survivors — a
+reader who learned "equal weight is blue" keeps that.
+
+**Every chart has a table twin.** A tooltip enhances a value; it must never be
+the only way to read one. `TableView` is the accessible equivalent, one click
+away.
+
+**No dual-axis charts, anywhere.** Two y-scales on one plot invent a
+correlation the data does not contain, because the alignment of the two scales
+is arbitrary. Two measures of different scale get two charts.
+
+### The bug found by actually looking at it
+
+The chart measured its container with a ref callback, which fires on render but
+**not on resize**. Widening the window left the SVG `viewBox` at its original
+width, so the plot stopped short of the card edge. Caught by screenshotting the
+page at two window sizes, not by TypeScript or the build.
+
+The fix is a `ResizeObserver` bound through a *callback ref* rather than an
+effect. That detail matters: the component has two branches (an empty state and
+the chart), and a callback ref re-binds automatically when one replaces the
+other. An effect with `[]` dependencies would have bound to whichever branch
+mounted first and never re-attached — so with no data on mount, the observer
+would never have bound at all.
+
+### Be ready for
+
+> *"Why does the API need a sign-in for a demo?"*
+
+Because the analysis endpoints are authenticated and pretending otherwise would
+mean a second unauthenticated code path. The gate explains it and pre-fills a
+demo account created on first use. The NSE page is deliberately public: it is
+market data, not user data.
+
+> *"Why is the whole thing client-rendered?"*
+
+The pages are user-driven queries against a local API, so there is nothing to
+pre-render usefully. Server components would matter if the data were shared,
+cacheable, or SEO-relevant. Saying "I didn't need it here" is better than
+adding it for its own sake.
+
+---
+
+## 11. Design decisions you should be able to justify
 
 Shorter items, but each is a plausible "why did you do it this way?"
 
@@ -589,7 +666,7 @@ long passwords can hash identically. Rejecting is better than truncating.
 
 ---
 
-## The seven sentences to have ready
+## The eight sentences to have ready
 
 If you only internalise one thing, make it these:
 
@@ -609,6 +686,9 @@ If you only internalise one thing, make it these:
    and it's uncorrelated with the asset, so it adds risk rather than hedging."*
 7. *"The ingestion pipeline is idempotent on a (ticker, date) key and aborts
    without writing if more than 20% of rows fail validation."*
+8. *"The chart palette was validated against a colour-vision checker rather
+   than chosen by eye, and the one colour that fails the contrast bar has
+   direct labels and a table view as relief."*
 
 ---
 

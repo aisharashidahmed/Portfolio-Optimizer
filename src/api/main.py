@@ -19,8 +19,13 @@ from sqlalchemy.orm import Session
 
 from src.algorithms.mvo import OptimizationFailedError
 from src.api.schemas import (
+    BacktestRequest,
+    BacktestResponse,
+    CurrencyRequest,
+    CurrencyResponse,
     HealthResponse,
     LoginCredentials,
+    NseCoverageResponse,
     OptimizationRunOut,
     OptimizationSyncResponse,
     OptimizeRequest,
@@ -37,6 +42,11 @@ from src.auth import (
 )
 from src.config import get_settings
 from src.database import OptimizationRun, User, get_db, init_db
+from src.services.analysis import (
+    AnalysisError,
+    run_backtest_comparison,
+    run_currency_analysis,
+)
 from src.services.optimization import (
     InsufficientDataError,
     UnknownAlgorithmError,
@@ -186,6 +196,104 @@ def get_history(
         .limit(min(limit, 100))
         .all()
     )
+
+
+# --------------------------------------------------------------------------
+# Analysis
+# --------------------------------------------------------------------------
+@app.post("/backtest", response_model=BacktestResponse)
+def backtest(
+    request: BacktestRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Walk-forward every strategy over identical data.
+
+    Synchronous: a decade of daily data across three strategies runs in a few
+    seconds. Longer universes belong on the queued path.
+    """
+    try:
+        comparison = run_backtest_comparison(
+            tickers=request.tickers,
+            start_date=request.start_date.isoformat(),
+            end_date=request.end_date.isoformat(),
+            risk_free_rate=settings.risk_free_rate,
+            training_days=request.training_days,
+            rebalance_every=request.rebalance_every,
+            transaction_cost_bps=request.transaction_cost_bps,
+            max_weight=request.max_weight,
+            strategies=request.strategies,
+        )
+    except (AnalysisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    return comparison.to_dict()
+
+
+@app.post("/currency", response_model=CurrencyResponse)
+def currency(
+    request: CurrencyRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Split each asset's KES return into asset, currency, and interaction."""
+    try:
+        return run_currency_analysis(
+            tickers=request.tickers,
+            start_date=request.start_date.isoformat(),
+            end_date=request.end_date.isoformat(),
+        )
+    except (AnalysisError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
+@app.get("/nse", response_model=NseCoverageResponse)
+def nse_coverage() -> dict:
+    """What the NSE ingestion store currently holds.
+
+    Public: it is market data, not user data, and the landing page shows it
+    before anyone signs in.
+    """
+    from src.ingestion.store import MarketDataStore
+
+    store = MarketDataStore("data/market_data.db")
+    coverage = store.coverage()
+    latest = store.latest_trade_date()
+
+    listings = []
+    if latest is not None:
+        frame = store.load_prices(start_date=latest, end_date=latest)
+        if not frame.empty:
+            row = frame.iloc[-1]
+            listings = [
+                {
+                    "ticker": ticker,
+                    "close_kes": float(value),
+                    "volume": None,
+                    "trade_date": latest.isoformat(),
+                }
+                for ticker, value in row.items()
+                if value == value  # drop NaN
+            ]
+
+    usable = 0
+    if not coverage.empty:
+        usable = int((coverage["observations"] >= 30).sum())
+
+    return {
+        "tickers_known": len(store.known_tickers()),
+        "price_rows": store.row_count(),
+        "latest_trade_date": latest.isoformat() if latest else None,
+        "usable_for_covariance": usable,
+        "listings": sorted(listings, key=lambda r: -r["close_kes"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------------
 
 
 @app.get("/health", response_model=HealthResponse)

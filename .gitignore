@@ -44,3 +44,10 @@ out/
 
 # Local warehouse is regenerable; the CSV snapshot is what we version.
 data/*.db
+
+# Next.js build output
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+frontend/next-env.d.ts
+frontend/AGENTS.md

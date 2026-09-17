@@ -213,3 +213,120 @@ class TestCovarianceEstimatorOption:
 
         assert shrunk["covariance_diagnostics"]["shrinkage_intensity"] > 0
         assert shrunk["weights"] != sample["weights"]
+
+
+BACKTEST_REQUEST = {
+    "tickers": ["AAPL", "MSFT", "GOOGL"],
+    "start_date": "2020-01-01",
+    "end_date": "2024-01-01",
+    "algorithm": "hrp",
+    "max_weight": 0.5,
+    "training_days": 252,
+}
+
+
+@pytest.fixture
+def fake_long_history(monkeypatch):
+    """Enough synthetic history for a walk-forward backtest."""
+    import numpy as np
+    import pandas as pd
+
+    def _prepare(tickers, start_date, end_date):
+        rng = np.random.default_rng(7)
+        n_obs = 900
+        index = pd.date_range("2020-01-01", periods=n_obs, freq="B")
+        market = rng.normal(0.0004, 0.010, n_obs)
+        betas = rng.uniform(0.7, 1.3, len(tickers))
+        data = np.outer(market, betas) + rng.normal(0, 0.008, (n_obs, len(tickers)))
+        daily = pd.DataFrame(data, index=index, columns=list(tickers))
+        prices = 100 * (1 + daily).cumprod()
+        return {
+            "prices": prices,
+            "daily_returns": daily,
+            "expected_annual_returns": daily.mean() * 252,
+            "annual_covariance": daily.cov() * 252,
+            "missing_tickers": [],
+        }
+
+    monkeypatch.setattr("src.services.analysis.prepare_market_data", _prepare)
+    return _prepare
+
+
+class TestBacktestEndpoint:
+    def test_requires_authentication(self, client):
+        assert client.post("/backtest", json=BACKTEST_REQUEST).status_code == 401
+
+    def test_returns_one_entry_per_strategy(
+        self, client, auth_headers, fake_long_history
+    ):
+        response = client.post("/backtest", json=BACKTEST_REQUEST, headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        strategies = {s["strategy"] for s in response.json()["strategies"]}
+        assert strategies == {"equal_weight", "hrp", "mvo"}
+
+    def test_curves_are_downsampled_for_transport(
+        self, client, auth_headers, fake_long_history
+    ):
+        response = client.post("/backtest", json=BACKTEST_REQUEST, headers=auth_headers)
+        for strategy in response.json()["strategies"]:
+            assert len(strategy["curve"]) <= 400
+
+    def test_curve_keeps_its_final_point(self, client, auth_headers, fake_long_history):
+        """Downsampling must not drop the number the reader will quote."""
+        response = client.post("/backtest", json=BACKTEST_REQUEST, headers=auth_headers)
+        equal = next(
+            s for s in response.json()["strategies"] if s["strategy"] == "equal_weight"
+        )
+        final_value = equal["curve"][-1]["value"]
+        implied = equal["performance"]["total_return"] + 1.0
+        assert final_value == pytest.approx(implied, rel=1e-6)
+
+    def test_can_request_a_subset_of_strategies(
+        self, client, auth_headers, fake_long_history
+    ):
+        payload = {**BACKTEST_REQUEST, "strategies": ["equal_weight"]}
+        response = client.post("/backtest", json=payload, headers=auth_headers)
+        assert [s["strategy"] for s in response.json()["strategies"]] == ["equal_weight"]
+
+    def test_rejects_a_window_too_short_to_leave_out_of_sample(
+        self, client, auth_headers
+    ):
+        payload = {**BACKTEST_REQUEST, "end_date": "2020-06-01"}
+        response = client.post("/backtest", json=payload, headers=auth_headers)
+        assert response.status_code == 422
+
+    def test_one_failing_strategy_does_not_sink_the_others(
+        self, client, auth_headers, fake_long_history, monkeypatch
+    ):
+        """MVO can legitimately refuse; the reader still gets the rest."""
+        from src.algorithms.mvo import OptimizationFailedError
+
+        def boom(self, returns, cov):
+            raise OptimizationFailedError("synthetic failure")
+
+        monkeypatch.setattr("src.algorithms.mvo.MVOOptimizer.optimize", boom)
+
+        response = client.post("/backtest", json=BACKTEST_REQUEST, headers=auth_headers)
+        assert response.status_code == 200
+
+        by_name = {s["strategy"]: s for s in response.json()["strategies"]}
+        assert by_name["mvo"]["error"] is not None
+        assert by_name["equal_weight"]["error"] is None
+        assert by_name["equal_weight"]["curve"]
+
+
+class TestNseEndpoint:
+    def test_is_public(self, client):
+        """Market data, not user data -- the landing page reads it signed out."""
+        assert client.get("/nse").status_code == 200
+
+    def test_reports_coverage_fields(self, client):
+        body = client.get("/nse").json()
+        assert set(body) >= {
+            "tickers_known",
+            "price_rows",
+            "latest_trade_date",
+            "usable_for_covariance",
+            "listings",
+        }
