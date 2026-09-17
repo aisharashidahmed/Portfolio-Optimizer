@@ -42,8 +42,13 @@ node_modules/
 .next/
 out/
 
-# Local warehouse is regenerable; the CSV snapshot is what we version.
+# Databases are runtime artifacts, never versioned. The root portfolio.db is
+# created by the default DATABASE_URL and holds the users table, so it must
+# never be committed even while empty.
 data/*.db
+portfolio.db
+*.sqlite
+*.sqlite3
 
 # Next.js build output
 frontend/.next/
