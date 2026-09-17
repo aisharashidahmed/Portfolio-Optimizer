@@ -41,3 +41,6 @@ data/cache/
 node_modules/
 .next/
 out/
+
+# Local warehouse is regenerable; the CSV snapshot is what we version.
+data/*.db

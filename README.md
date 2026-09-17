@@ -23,9 +23,13 @@ a footnote.
   imported, with the optimal shrinkage intensity derived analytically
 - **Walk-forward backtesting** with weight drift, per-rebalance transaction
   costs, and structurally enforced no-lookahead
+- **NSE ingestion pipeline** — all 71 Nairobi-listed companies, idempotent
+  storage, schema-change detection, and a robots.txt-compliant crawl delay
+- **Currency risk decomposition** — splits a Kenyan investor's return on a US
+  asset into the asset, the shilling, and the interaction between them
 - **REST API** with JWT auth, request validation, and per-user run history
 - **Async job queue** for optimizations too slow to run inline
-- **157 tests**, 92% line coverage, no network access required to run them
+- **268 tests**, 91% line coverage, no network access required to run them
 
 ## Quickstart
 
@@ -49,6 +53,79 @@ Run the engine directly against live market data:
 ```bash
 python run_engine.py      # compare MVO against equal-weight
 python run_backtest.py    # train/test split, out-of-sample results
+```
+
+## The Kenya problem
+
+A Kenyan investor holding US assets does not earn the asset's return. They earn
+the asset's return compounded with the KES/USD move, and over the last decade
+the currency term was the larger of the two for several assets.
+
+**S&P 500, 2015–2024, for a Kenyan investor:**
+
+| | |
+|---|---:|
+| Asset return (USD) | 245.8% |
+| Currency return | 41.2% |
+| Interaction | 101.4% |
+| **Total return (KES)** | **388.4%** |
+
+The shilling went from 90.5 to 128.2 per dollar. Holding dollars returned 41%
+before any asset appreciation at all.
+
+Risk moves too. Measured in shillings, the S&P's volatility rises from 17.6% to
+19.7%, and **20.9% of total variance is currency**, at a correlation of −0.017
+with the asset — essentially independent, so it *adds* risk rather than hedging
+it.
+
+The pattern across assets is the interesting part:
+
+| | Return (USD) | Return (KES) | Vol (USD) | Vol (KES) | FX share of risk |
+|---|---|---|---|---|---|
+| SPY | 245.8% | 388.4% | 17.6% | 19.7% | **20.9%** |
+| JNJ | 83.6% | 159.3% | 18.1% | 19.9% | 19.5% |
+| PG | 146.7% | 248.5% | 18.5% | 20.2% | 18.4% |
+| MSFT | 959.5% | 1396.4% | 27.1% | 28.8% | 10.6% |
+| AAPL | 958.4% | 1394.8% | 28.5% | 29.9% | 9.4% |
+
+**The safer the asset, the more the currency dominates.** Currency is 21% of the
+risk in an S&P index fund but only 9% in Apple. A Kenyan investor reaching for
+"safe" US assets is, in shilling terms, mostly buying an FX position.
+
+Reproduce with `python run_currency_analysis.py`.
+
+### Where the data comes from
+
+Verified rather than assumed: Yahoo Finance has **no** NSE coverage under any
+ticker-suffix convention, and the exchange sells its historical data rather than
+publishing it. What is free:
+
+| Source | Provides | Depth | Constraint |
+|---|---|---|---|
+| [AFX](https://afx.kwayisi.org/nse/) | All 71 NSE listings, price, volume | ~10 sessions | `Crawl-delay: 60` |
+| Yahoo `KES=X` | Daily KES per USD | 10 years | — |
+| Yahoo (US equities) | US prices | 10 years+ | — |
+
+The crawl delay shaped the design rather than being worked around: the listing
+page carries every ticker, so a daily run costs the source **one request**. The
+client identifies itself honestly and backs off exponentially on failure.
+
+**Deep NSE history is not freely available.** The store therefore accumulates
+forward — each run adds a day — and says so rather than pretending otherwise:
+
+```
+$ python run_ingestion.py --status
+71 tickers have under 30 observations and are not yet usable
+for covariance estimation.
+```
+
+The currency analysis above needs only FX and US data, so it works today across
+a full decade.
+
+```bash
+python run_ingestion.py                          # fetch and store (idempotent)
+python run_ingestion.py --status                 # coverage report
+python run_ingestion.py --export data/nse.csv    # portable snapshot
 ```
 
 ## What the backtest actually says
@@ -196,6 +273,11 @@ Tests are organised by behaviour, not by coverage target:
   wrong password, so the endpoint can't be used to enumerate users
 - **Reference cross-check** — the vectorised Ledoit-Wolf code is verified
   against a literal loop-by-loop transcription of the published formulas
+- **Hostile scraped input** — malformed prices, suspended counters, thousands
+  separators, volume shorthand, `nan`/`inf` strings, future-dated rows, and a
+  site redesign (which must raise, never silently return zero rows)
+- **Idempotency** — running the ingestion five times leaves the store exactly
+  as running it once did
 
 ### Property-based testing
 
@@ -249,7 +331,7 @@ known key.
 - [x] **Phase 0** — Correct HRP, single data path, environment config, API test suite
 - [x] **Phase 1** — Ledoit-Wolf shrinkage, walk-forward backtesting with costs,
       property-based tests
-- [ ] **Phase 2** — NSE ingestion pipeline and KES/USD currency-risk decomposition
+- [x] **Phase 2** — NSE ingestion pipeline and KES/USD currency-risk decomposition
 - [ ] **Phase 3** — Alembic migrations, Docker Compose, structured logging
 - [ ] **Phase 4** — Next.js + TypeScript frontend
 - [ ] **Phase 5** — Retrieval over SEC EDGAR filings, then NSE annual reports

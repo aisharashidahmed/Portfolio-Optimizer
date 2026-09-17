@@ -352,7 +352,197 @@ repo.
 
 ---
 
-## 7. Design decisions you should be able to justify
+## 7. The FX alignment bug
+
+**Priority: high.** This is the best bug in the project and the one most worth
+being able to tell.
+
+### The setup
+
+To measure what a Kenyan investor earned on a US asset, you need the asset's
+daily returns and the daily KES/USD move, aligned by date. The obvious approach:
+compute FX returns, then join them onto the equity return series.
+
+```python
+fx = rate.pct_change().dropna()
+aligned = pd.concat([asset_returns, fx], axis=1).dropna()   # WRONG
+```
+
+### Why it's wrong
+
+**Currency markets trade on days equity markets do not.** US market holidays,
+for instance. The inner join silently discards the FX observations on those
+days — but an investor holding the asset across the gap genuinely bore those
+currency moves.
+
+### How it was caught
+
+Two numbers that should have matched didn't:
+
+- Cumulative USD/KES depreciation from endpoints: **41.6%**
+- Compounded daily FX returns after the join: **67.7%**
+
+Compounding daily percentage changes should telescope exactly back to the
+endpoint ratio. It didn't, which meant observations were being dropped.
+
+Digging in: the join kept 2,514 of 2,607 FX days. The 93 discarded days
+compounded to **−15.6%** — the shilling had strengthened on those days on net.
+Removing them inflated measured depreciation by more than half.
+
+### The fix
+
+Reindex the *rate level* onto the target calendar, then difference it there:
+
+```python
+union = rate.index.union(target_index)
+on_target = rate.reindex(union).ffill().reindex(target_index)
+return on_target.pct_change().dropna()
+```
+
+Now the return from one equity trading day to the next spans **all** intervening
+currency movement — which is precisely the exposure the investor bears.
+
+### Making it unrepeatable
+
+`decompose_currency_risk` now demands the **rate level**, not returns, and
+raises if it's handed something whose median looks like a return series. The
+correct alignment became the only thing a caller can do.
+
+### Be ready for
+
+> *"How did you notice?"*
+
+An identity that must hold didn't. Compounded returns have to telescope to the
+endpoint ratio; when they don't, you're dropping or double-counting
+observations. Checking a known identity is a cheap and general debugging tool.
+
+> *"What's the general lesson?"*
+
+`dropna()` after a join is a silent data-loss operation. When two series live on
+different calendars, ask what the *economically correct* alignment is rather
+than taking the intersection because it's convenient.
+
+---
+
+## 8. The ingestion pipeline
+
+**Priority: high for backend interviews.** This is the systems part.
+
+### Why scraping at all
+
+Verified, not assumed: Yahoo has no NSE coverage under any suffix convention
+(`.NR`, `.KE`, `.NSE`, bare — all empty). The exchange sells its historical data.
+The free source is AFX, which publishes a clean HTML table of all 71 listings.
+
+### The constraints that shaped the design
+
+**`Crawl-delay: 60` in robots.txt.** Honoured in `RateLimiter`. It's also *why*
+the listing page is preferred over per-ticker pages: one request returns all 71
+prices, so a daily run costs the source a single hit. Per-ticker pages would be
+71 requests and 71 minutes.
+
+**Only ~10 sessions of history exist.** There is no free deep archive, so the
+store accumulates forward. The status command says so plainly rather than
+letting someone backtest on one day of data.
+
+### The properties worth defending
+
+**Idempotency.** A scheduled job gets re-run after a failure, or twice by an
+impatient operator. Natural key `(ticker, trade_date)` plus an upsert means five
+runs leave the store exactly as one did. The report distinguishes
+`inserted / updated / unchanged`, so a no-op run is *visibly* a no-op — proof,
+not hope.
+
+**Fail loudly on schema change.** A scraper that returns zero rows after a site
+redesign is worse than one that crashes, because the pipeline reports success
+and the data quietly goes stale. `SchemaChangedError` is raised when the
+expected columns aren't found. The table is located **by its headers, not by
+index** — `find_all('table')[3]` would break the moment the page gains a banner.
+
+**Partial failure is tolerated; mass failure is not.** One malformed row is
+recorded in `rejected` and the batch proceeds. But if more than 20% of rows fail
+validation, `IngestionAborted` fires and **nothing is written** — that pattern
+means the layout changed, and a partial universe in the store is worse than no
+new data.
+
+**Validation at the edge.** Scraped data is hostile input. `parse_number`
+handles thousands separators, accounting negatives, percent suffixes, and volume
+shorthand (`10.8M`), and *rejects* `nan`/`inf` strings — `float('nan')` succeeds
+silently and poisons every downstream covariance. Prices must be positive and
+below a plausibility ceiling; a market cap misread into the price column looks
+exactly like that.
+
+**Provenance.** Every row records `source` and `fetched_at`. Without those,
+reconciling a disputed number later is guesswork.
+
+### Why CSV, not the SQLite file, is committed
+
+A binary database in version control produces unreadable diffs and conflicts on
+every run. The CSV is sorted by date then ticker, so a day's ingestion shows up
+in review as exactly the rows it added.
+
+### Be ready for
+
+> *"What happens if the site changes its layout?"*
+
+Cosmetic changes are survived, because the table is found by header content.
+Structural changes raise `SchemaChangedError` immediately. There's a test that
+injects a decoy table and asserts the parser still finds the right one, and
+another that feeds it a maintenance page and asserts it raises.
+
+> *"Is scraping this site OK?"*
+
+Public data, robots.txt permits the path, the crawl delay is honoured, the
+client identifies itself with a contact URL, and a full run is one request per
+day.
+
+> *"How would you scale this to more exchanges?"*
+
+The parser is a pure function from HTML to validated records, so a new source is
+a new parser plus an entry in the store — the pipeline, validation, and
+idempotency logic are unchanged.
+
+---
+
+## 9. Why a Kenyan's risk-free rate changes everything
+
+**Priority: medium, but it is the project's whole thesis.**
+
+Kenyan T-bills have recently yielded far above US Treasuries. That looks like
+free money and isn't.
+
+**Uncovered interest parity:** a currency expected to weaken must offer a higher
+interest rate, or nobody would hold it. The extra yield is compensation for
+expected depreciation, not a free lunch.
+
+`kes_risk_free_advantage()` computes what's actually left:
+
+```
+(1 + kes_rate) / (1 + expected_depreciation) - 1 - usd_rate
+```
+
+At 16% KES, 4.5% USD, and 11% expected depreciation, the advantage is roughly
+**zero**. At 25% depreciation it's negative.
+
+This matters because every Sharpe ratio in the project is computed against a
+risk-free rate. Using 4.5% for a Kenyan investor who can buy a 16% T-bill makes
+every allocation wrong — the hurdle any risky asset must clear is far higher
+than the US number implies.
+
+### Be ready for
+
+> *"So should a Kenyan hold US assets?"*
+
+The honest answer is that the project makes it a measurable question rather than
+answering it. The decomposition shows currency is ~21% of the risk in an S&P
+position and essentially uncorrelated with the asset, so it adds risk. Whether
+that's worth it depends on the investor's liabilities: someone who will spend in
+shillings bears real currency risk, while someone saving for overseas education
+is arguably *hedged* by holding dollars.
+
+---
+
+## 10. Design decisions you should be able to justify
 
 Shorter items, but each is a plausible "why did you do it this way?"
 
@@ -399,7 +589,7 @@ long passwords can hash identically. Rejecting is better than truncating.
 
 ---
 
-## The five sentences to have ready
+## The seven sentences to have ready
 
 If you only internalise one thing, make it these:
 
@@ -415,6 +605,10 @@ If you only internalise one thing, make it these:
    permutation-invariant when correlation distances tie."*
 5. *"Equal weight beats both optimizers, and I can point at turnover as the
    mechanism."*
+6. *"Currency is about a fifth of a Kenyan investor's risk in an S&P position,
+   and it's uncorrelated with the asset, so it adds risk rather than hedging."*
+7. *"The ingestion pipeline is idempotent on a (ticker, date) key and aborts
+   without writing if more than 20% of rows fail validation."*
 
 ---
 
@@ -427,6 +621,10 @@ Volunteering a limitation reads as confidence. Being caught out by one doesn't.
 - **Partial-tie ordering in HRP.** Handled for total degeneracy only.
 - **Expected returns are historical means.** These are notoriously poor
   forecasts; it's the main reason MVO underperforms here.
-- **US-only so far.** The Kenya/NSE side is Phase 2.
+- **NSE history is one day deep and grows forward.** No free deep archive
+  exists, so NSE-based backtests are not yet possible. The currency analysis
+  needs only FX and US data and covers a full decade.
+- **Expected depreciation is an input, not a forecast.** `kes_risk_free_advantage`
+  takes it as a parameter; the project does not predict it.
 - **No walk-forward hyperparameter selection.** `training_days` and
   `rebalance_every` are fixed, not chosen out-of-sample.
